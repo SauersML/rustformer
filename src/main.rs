@@ -749,6 +749,10 @@ fn forward(&self, input: &[usize]) -> Matrix {
     }
 }
 
+
+
+
+
 fn main() {
     println!("Starting main function");
     // Read the text file
@@ -760,6 +764,14 @@ fn main() {
     let tokens = tokenizer.tokenize(&contents);
     println!("Tokenized text, number of tokens: {}", tokens.len());
 
+    // Define training parameters
+    let seq_length = 40;
+    let epochs = 4;
+    let learning_rate = 0.01;
+
+    let total_iterations = epochs * (tokens.len() - seq_length - 1);
+    let mut current_iteration = 0;
+
     // Initialize the transformer
     let vocab_size = tokenizer.vocab_size();
     let embedding_dim = 128;
@@ -770,11 +782,6 @@ fn main() {
              vocab_size, embedding_dim, num_blocks, heads);
     let mut transformer = Transformer::new(vocab_size, embedding_dim, num_blocks, heads);
 
-    // Training loop
-    let seq_length = 20;
-    let epochs = 10;
-    let learning_rate = 0.01;
-
     println!("Starting training loop: seq_length={}, epochs={}, learning_rate={}", seq_length, epochs, learning_rate);
     for epoch in 0..epochs {
         println!("Starting epoch {}", epoch + 1);
@@ -783,7 +790,14 @@ fn main() {
         for i in 0..tokens.len() - seq_length - 1 {
             let input = &tokens[i..i+seq_length];
             let target = &tokens[i+1..i+seq_length+1];
+            
+
+            current_iteration += 1;
+            let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
+            println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
+
             let loss = transformer.train(input, target, learning_rate);
+
             total_loss += loss;
             batch_count += 1;
             if batch_count % 100 == 0 {
@@ -793,8 +807,9 @@ fn main() {
         println!("Epoch {} completed, Average Loss: {}", epoch + 1, total_loss / batch_count as f64);
     }
 
+
     // Generate predictions
-    let prompt = "The cat sat";
+    let prompt = "Between my finger and my thumb";
     println!("Generating predictions for prompt: '{}'", prompt);
     let mut input_tokens = tokenizer.tokenize(prompt);
     println!("Tokenized prompt: {:?}", input_tokens);
@@ -821,4 +836,5 @@ fn main() {
     }
     println!();
     println!("Prediction generation completed");
+
 }
