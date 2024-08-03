@@ -801,7 +801,7 @@ impl Transformer {
         output
     }
 
-    fn train(&mut self, input: &[usize], target: &[usize], learning_rate: f64) -> f64 {
+    fn train(&mut self, input: &[usize], target: &[usize], learning_rate: f64, tokenizer: &Tokenizer) -> f64 {
         println!("Training on input of length {}", input.len());
         let output = self.forward(input);
         let mut loss = 0.0;
@@ -849,9 +849,30 @@ impl Transformer {
                     self.embedding.embeddings.get(input[i], j) - learning_rate * block_gradients.get(i, j));
             }
         }
+        // Generate and print prediction
+        let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
+        let input_text = input_words.join(" ");
+        let prediction = self.predict_next_token(input, tokenizer);
+        println!("Input: '{}...'", input_text.chars().take(20).collect::<String>());
+        println!("Predicted next token: '{}'", prediction);
+        println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
+        println!("Batch loss: {}", loss);
 
         loss
     }
+
+    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer) -> String {
+        let output = self.forward(input);
+        let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
+        let probs = softmax(&last_row);
+        let next_token = probs.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(index, _)| index)
+            .unwrap();
+        tokenizer.decode(next_token).to_string()
+    }
+
 }
 
 
@@ -896,16 +917,16 @@ fn main() {
             let input = &tokens[i..i+seq_length];
             let target = &tokens[i+1..i+seq_length+1];
             
-
             current_iteration += 1;
             let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
             println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
 
-            let loss = transformer.train(input, target, learning_rate);
+            let loss = transformer.train(input, target, learning_rate, &tokenizer);
 
             total_loss += loss;
             batch_count += 1;
             println!("Epoch {}, Batch {}: Average Loss = {}", epoch + 1, batch_count, total_loss / batch_count as f64);
+            println!("--------------------");
         }
         println!("Epoch {} completed, Average Loss: {}", epoch + 1, total_loss / batch_count as f64);
     }
