@@ -203,6 +203,9 @@ fn initialize_weights(matrix: &mut Matrix, rng: &mut Rng) {
 
 
 
+
+
+
 struct Tokenizer {
     vocab: Vec<(String, usize)>,
     word_counts: Vec<(String, usize)>,
@@ -216,7 +219,7 @@ impl Tokenizer {
         Tokenizer {
             vocab: Vec::new(),
             word_counts: Vec::new(),
-            threshold: 5,
+            threshold: 3,
             max_vocab_size: 10000,
         }
     }
@@ -224,7 +227,6 @@ impl Tokenizer {
     fn tokenize(&mut self, text: &str) -> Vec<usize> {
         println!("Tokenizing text of length: {}", text.len());
         let words: Vec<String> = text.split_whitespace().map(|s| s.to_lowercase()).collect();
-        let mut tokens = Vec::new();
 
         // First pass: count words
         for word in &words {
@@ -236,6 +238,7 @@ impl Tokenizer {
 
         // Build vocabulary based on frequency
         self.vocab.clear();
+        self.vocab.push(("<UNK>".to_string(), 0)); // Add unknown token
         for (word, count) in &self.word_counts {
             if *count >= self.threshold && self.vocab.len() < self.max_vocab_size {
                 self.vocab.push((word.clone(), self.vocab.len()));
@@ -243,23 +246,22 @@ impl Tokenizer {
         }
 
         // Second pass: tokenize
-        for word in words {
-            let token = self.vocab.iter().position(|(w, _)| w == &word).unwrap_or(self.vocab.len());
-            tokens.push(token);
-        }
+        let tokens: Vec<usize> = words.iter()
+            .map(|word| self.vocab.iter().position(|(w, _)| w == word).unwrap_or(0))
+            .collect();
 
         // Print statistics
         println!("Tokenized into {} tokens", tokens.len());
         println!("Vocabulary size: {}", self.vocab.len());
         println!("Total unique words: {}", self.word_counts.len());
         
-        let words_kept = self.vocab.len();
+        let words_kept = self.vocab.len() - 1; // Subtract 1 for <UNK> token
         let words_discarded = self.word_counts.len() - words_kept;
         println!("Words kept: {}, Words discarded: {}", words_kept, words_discarded);
         
-        if !self.vocab.is_empty() {
+        if self.vocab.len() > 1 {
             println!("Examples of kept words:");
-            for (word, _) in self.vocab.iter().take(5) {
+            for (word, _) in self.vocab.iter().skip(1).take(5) {
                 println!("  - {}", word);
             }
         }
@@ -290,6 +292,8 @@ impl Tokenizer {
         }
     }
 }
+
+
 
 
 
