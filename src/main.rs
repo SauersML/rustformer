@@ -38,12 +38,11 @@ impl Matrix {
         let mut result = Matrix::new(rows, cols);
 
         for i in 0..rows {
-            for j in 0..cols {
-                let mut sum = 0.0;
-                for k in 0..self.cols {
-                    sum += self.get(i, k) * other.get(k, j);
+            for k in 0..self.cols {
+                let self_val = self.get(i, k);
+                for j in 0..cols {
+                    result.set(i, j, result.get(i, j) + self_val * other.get(k, j));
                 }
-                result.set(i, j, sum);
             }
         }
         result
@@ -136,16 +135,20 @@ fn softmax(input: &[f64]) -> Vec<f64> {
 }
 
 fn exp(x: f64) -> f64 {
-    let mut sum = 1.0;
-    let mut term = 1.0;
-    for i in 1..100 {
-        term *= x / i as f64;
-        sum += term;
-        if term.abs() < 1e-10 {
-            break;
-        }
+    if x < -709.0 {
+        return 0.0;
     }
-    sum
+    if x > 709.0 {
+        return f64::MAX;
+    }
+    let mut result = 1.0 + x;
+    let x2 = x * x;
+    result += x2 * 0.5;
+    result += x2 * x * 0.1666666666666667;
+    result += x2 * x2 * 0.041666666666666664;
+    result += x2 * x2 * x * 0.008333333333333333;
+    result += x2 * x2 * x2 * 0.001388888888888889;
+    result
 }
 
 fn ln(x: f64) -> f64 {
@@ -348,46 +351,20 @@ impl MultiHeadAttention {
         let k = key.dot(&self.w_k);
         let v = value.dot(&self.w_v);
 
-        // Split heads
-        let mut q_heads = Vec::new();
-        let mut k_heads = Vec::new();
-        let mut v_heads = Vec::new();
+        let mut concat_output = Matrix::new(seq_len, self.dim);
 
-        for h in 0..self.heads {
-            let start = h * self.head_dim;
-
-            let mut q_head = Matrix::new(seq_len, self.head_dim);
-            let mut k_head = Matrix::new(seq_len, self.head_dim);
-            let mut v_head = Matrix::new(seq_len, self.head_dim);
-
-            for i in 0..seq_len {
-                for j in 0..self.head_dim {
-                    q_head.set(i, j, q.get(i, start + j));
-                    k_head.set(i, j, k.get(i, start + j));
-                    v_head.set(i, j, v.get(i, start + j));
-                }
-            }
-
-            q_heads.push(q_head);
-            k_heads.push(k_head);
-            v_heads.push(v_head);
-        }
-
-        // Compute attention for each head
-        let mut head_outputs = Vec::new();
         for h in 0..self.heads {
             println!("Processing head {}", h);
-            let q_head = &q_heads[h];
-            let k_head = &k_heads[h];
-            let v_head = &v_heads[h];
+            let start = h * self.head_dim;
+            let end = start + self.head_dim;
 
             // Compute attention scores
             let mut attention_scores = Matrix::new(seq_len, seq_len);
             for i in 0..seq_len {
                 for j in 0..seq_len {
                     let mut score = 0.0;
-                    for m in 0..self.head_dim {
-                        score += q_head.get(i, m) * k_head.get(j, m);
+                    for m in start..end {
+                        score += q.get(i, m) * k.get(j, m);
                     }
                     attention_scores.set(i, j, score / (self.head_dim as f64).sqrt());
                 }
@@ -402,37 +379,29 @@ impl MultiHeadAttention {
                 }
             }
 
-            // Apply attention to values
-            let mut head_output = Matrix::new(seq_len, self.head_dim);
+            // Apply attention to values and directly set to concat_output
             for i in 0..seq_len {
-                for j in 0..self.head_dim {
+                for j in start..end {
                     let mut sum = 0.0;
                     for k in 0..seq_len {
-                        sum += attention_scores.get(i, k) * v_head.get(k, j);
+                        sum += attention_scores.get(i, k) * v.get(k, j);
                     }
-                    head_output.set(i, j, sum);
-                }
-            }
-            head_outputs.push(head_output);
-        }
-
-        // Concatenate heads
-        let mut concat_output = Matrix::new(seq_len, self.dim);
-        for i in 0..seq_len {
-            let mut idx = 0;
-            for head_output in &head_outputs {
-                for j in 0..self.head_dim {
-                    concat_output.set(i, idx, head_output.get(i, j));
-                    idx += 1;
+                    concat_output.set(i, j, sum);
                 }
             }
         }
 
         println!("MultiHeadAttention output shape: {}x{}", concat_output.rows, concat_output.cols);
-
         // Final linear layer
         concat_output.dot(&self.w_o)
     }
+
+
+
+
+
+
+
 
     fn backward(&mut self, gradients: &Matrix, learning_rate: f64) -> Matrix {
         println!("MultiHeadAttention backward pass");
@@ -918,29 +887,35 @@ fn main() {
     let mut transformer = Transformer::new(vocab_size, embedding_dim, num_blocks, heads);
 
     println!("Starting training loop: seq_length={}, epochs={}, learning_rate={}", seq_length, epochs, learning_rate);
+    let batch_size = 32;
     for epoch in 0..epochs {
         println!("Starting epoch {}", epoch + 1);
         let mut total_loss = 0.0;
         let mut batch_count = 0;
-        for i in 0..tokens.len() - seq_length - 1 {
-            let input = &tokens[i..i+seq_length];
-            let target = &tokens[i+1..i+seq_length+1];
-            
-            current_iteration += 1;
-            let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
-            println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
-
-            let loss = transformer.train(input, target, learning_rate, &tokenizer);
-
-            total_loss += loss;
+        for i in (0..tokens.len() - seq_length - 1).step_by(batch_size) {
+            let mut batch_loss = 0.0;
+            for j in 0..batch_size {
+                if i + j >= tokens.len() - seq_length - 1 {
+                    break;
+                }
+                let input = &tokens[i+j..i+j+seq_length];
+                let target = &tokens[i+j+1..i+j+seq_length+1];
+                
+                batch_loss += transformer.train(input, target, learning_rate, &tokenizer);
+            }
+            total_loss += batch_loss;
             batch_count += 1;
-            println!("Epoch {}, Batch {}: Loss = {}", epoch + 1, batch_count, loss);
-            println!("--------------------");
+            
+            current_iteration += batch_size;
+            if current_iteration % 100 == 0 {
+                let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
+                println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
+            }
+
+            println!("Epoch {}, Batch {}: Average Loss = {}", epoch + 1, batch_count, batch_loss / batch_size as f64);
         }
         println!("Epoch {} completed, Average Loss: {}", epoch + 1, total_loss / batch_count as f64);
     }
-
-
 
 
     // Generate predictions
