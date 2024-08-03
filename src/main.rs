@@ -314,7 +314,7 @@ impl Embedding {
     fn new(vocab_size: usize, embedding_dim: usize) -> Self {
         println!("Creating Embedding with vocab_size: {}, embedding_dim: {}", vocab_size, embedding_dim);
         let mut embeddings = Matrix::new(vocab_size, embedding_dim);
-        let mut seed: u64 = 123456789;
+        let mut seed: u64 = 153456759;
         for i in 0..vocab_size {
             for j in 0..embedding_dim {
                 embeddings.set(i, j, Self::lcg_random(&mut seed));
@@ -783,7 +783,7 @@ struct Transformer {
 impl Transformer {
     fn new(vocab_size: usize, embedding_dim: usize, num_blocks: usize, heads: usize) -> Self {
         println!("Creating Transformer: vocab_size={}, embedding_dim={}, num_blocks={}, heads={}", vocab_size, embedding_dim, num_blocks, heads);
-        let mut rng = Rng::new(12345);  // Use a fixed seed for reproducibility
+        let mut rng = Rng::new(12242);  // Use a fixed seed for reproducibility
         let mut embedding = Embedding::new(vocab_size, embedding_dim);
         initialize_weights(&mut embedding.embeddings, &mut rng);
 
@@ -830,7 +830,7 @@ impl Transformer {
         output
     }
 
-    fn train(&mut self, input: &[usize], target: &[usize], learning_rate: f64, tokenizer: &Tokenizer) -> f64 {
+    fn train(&mut self, input: &[usize], target: &[usize], learning_rate: f64, tokenizer: &mut Tokenizer, temperature: f64) -> f64 {
         println!("Training on input of length {}", input.len());
         let output = self.forward(input);
         let mut loss = 0.0;
@@ -850,15 +850,17 @@ impl Transformer {
 
         println!("Calculated loss: {}", loss);
 
-        // Generate and print prediction
+        // Generate and print prediction using generate_sequence
         let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
         let input_text = input_words.join(" ");
-        let prediction = self.predict_next_token(input, tokenizer);
+
+        let generated_sequence = self.generate_sequence(&input_text, tokenizer, temperature);
+
         println!("Input: '{}...{}'", 
             input_text.chars().take(20).collect::<String>(),
             input_text.chars().rev().take(40).collect::<String>().chars().rev().collect::<String>()
         );
-        println!("Predicted next token: '{}'", prediction);
+        println!("Predicted next tokens (multiple words): '{}'", generated_sequence);
         println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
         println!("Calculated loss: {}", loss);
 
@@ -893,19 +895,23 @@ impl Transformer {
         // Generate and print prediction
         let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
         let input_text = input_words.join(" ");
-        let prediction = self.predict_next_token(input, tokenizer);
+        let prediction = self.predict_next_token(input, tokenizer, temperature);
         println!("Input: '{}...'", input_text.chars().take(20).collect::<String>());
-        println!("Predicted next token: '{}'", prediction);
         println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
         println!("Batch loss: {}", loss);
 
         loss
     }
 
-    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer) -> String {
+    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer, temperature: f64) -> usize {
         let output = self.forward(input);
         let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
-        let mut probs = softmax(&last_row);
+        let mut logits = last_row;
+        
+        // Apply temperature
+        logits.iter_mut().for_each(|logit| *logit /= temperature);
+        
+        let mut probs = softmax(&logits);
         
         // Set probability of UNK token to 0
         let unk_index = tokenizer.vocab.iter().position(|(word, _)| word == "<UNK>").unwrap_or(0);
@@ -915,19 +921,66 @@ impl Transformer {
         let sum: f64 = probs.iter().sum();
         probs.iter_mut().for_each(|p| *p /= sum);
         
-        let next_token = probs.iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(index, _)| index)
-            .unwrap();
-        
-        tokenizer.decode(next_token).to_string()
+        // Sample from the distribution using a simple random number generator
+        let mut rng = Rng::new(14342); 
+        let random_value = rng.next_f64();
+        let mut cumulative_prob = 0.0;
+        for (index, &prob) in probs.iter().enumerate() {
+            cumulative_prob += prob;
+            if random_value < cumulative_prob {
+                return index;
+            }
+        }
+        probs.len() - 1 // Fallback to the last token if sampling fails
     }
 
+    fn generate_sequence(&self, prompt: &str, tokenizer: &mut Tokenizer, temperature: f64) -> String {
+        let mut input_tokens = tokenizer.tokenize(prompt);
+        let mut generated_words = Vec::with_capacity(10);
+        println!("Generating sequence from prompt: '{}'", prompt);
+
+        let mut rng = Rng::new(24342);
+        let unk_index = tokenizer.vocab.iter().position(|(word, _)| word == "<UNK>").unwrap_or(0);
+
+        for i in 0..10 {
+            let output = self.forward(&input_tokens);
+            let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j) / temperature).collect();
+            
+            let mut probs = softmax(&last_row);
+            probs[unk_index] = 0.0;
+            
+            let sum: f64 = probs.iter().sum();
+            probs.iter_mut().for_each(|p| *p /= sum);
+            
+            let random_value = rng.next_f64();
+            let mut cumulative_prob = 0.0;
+            let next_token = probs.iter().enumerate()
+                .find(|(_, &prob)| {
+                    cumulative_prob += prob;
+                    random_value < cumulative_prob
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(probs.len() - 1);
+
+            let next_word = tokenizer.decode(next_token).to_string();
+            println!("Generated token {}: '{}'", i + 1, next_word);
+            generated_words.push(next_word);
+
+            input_tokens.push(next_token);
+            if input_tokens.len() > self.embedding.embeddings.rows {
+                input_tokens.remove(0);
+            }
+        }
+
+        let generated_sequence = generated_words.join(" ");
+        println!("Complete generated sequence: '{}'", generated_sequence);
+        
+        // Print all tokens at once
+        println!("All generated tokens: {:?}", generated_words);
+
+        generated_sequence
+    }
 }
-
-
-
 
 
 fn main() {
@@ -959,6 +1012,8 @@ fn main() {
              vocab_size, embedding_dim, num_blocks, heads);
     let mut transformer = Transformer::new(vocab_size, embedding_dim, num_blocks, heads);
 
+    let temperature = 0.8;
+
     println!("Starting training loop: seq_length={}, epochs={}, learning_rate={}", seq_length, epochs, learning_rate);
     let batch_size = 32;
     for epoch in 0..epochs {
@@ -974,7 +1029,8 @@ fn main() {
                 let input = &tokens[i+j..i+j+seq_length];
                 let target = &tokens[i+j+1..i+j+seq_length+1];
                 
-                batch_loss += transformer.train(input, target, learning_rate, &tokenizer);
+                batch_loss += transformer.train(input, target, learning_rate, &mut tokenizer, temperature);
+
             }
             total_loss += batch_loss;
             batch_count += 1;
@@ -992,37 +1048,10 @@ fn main() {
     // Generate predictions
     let prompt = "Between my finger and my thumb";
     println!("Generating predictions for prompt: '{}'", prompt);
-    let mut input_tokens = tokenizer.tokenize(prompt);
-    println!("Tokenized prompt: {:?}", input_tokens);
 
-    for i in 0..10 {
-        println!("Generating token {}", i + 1);
-        let output = transformer.forward(&input_tokens);
-
-        let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
-        let mut probs = softmax(&last_row);
-        
-        // Set probability of UNK token to 0
-        let unk_index = tokenizer.vocab.iter().position(|(word, _)| word == "<UNK>").unwrap_or(0);
-        probs[unk_index] = 0.0;
-        
-        // Renormalize probabilities
-        let sum: f64 = probs.iter().sum();
-        probs.iter_mut().for_each(|p| *p /= sum);
-
-        let next_token = probs.iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(index, _)| index)
-            .unwrap();
-
-        let next_word = tokenizer.decode(next_token);
-        print!("{} ", next_word);
-
-        input_tokens.push(next_token);
-        input_tokens = input_tokens[1..].to_vec();
-    }
-    println!();
+    let temperature = 0.8;
+    let generated_sequence = transformer.generate_sequence(prompt, &mut tokenizer, temperature);
+    
+    println!("Generated sequence: {}", generated_sequence);
     println!("Prediction generation completed");
-
 }
