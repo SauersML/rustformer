@@ -203,15 +203,22 @@ fn initialize_weights(matrix: &mut Matrix, rng: &mut Rng) {
 
 
 
-
 struct Tokenizer {
     vocab: Vec<(String, usize)>,
+    word_counts: Vec<(String, usize)>,
+    threshold: usize,
+    max_vocab_size: usize,
 }
 
 impl Tokenizer {
     fn new() -> Self {
         println!("Creating new Tokenizer");
-        Tokenizer { vocab: Vec::new() }
+        Tokenizer {
+            vocab: Vec::new(),
+            word_counts: Vec::new(),
+            threshold: 5,
+            max_vocab_size: 10000,
+        }
     }
 
     fn tokenize(&mut self, text: &str) -> Vec<usize> {
@@ -219,19 +226,55 @@ impl Tokenizer {
         let words: Vec<String> = text.split_whitespace().map(|s| s.to_lowercase()).collect();
         let mut tokens = Vec::new();
 
+        // First pass: count words
+        for word in &words {
+            match self.word_counts.iter_mut().find(|(w, _)| w == word) {
+                Some((_, count)) => *count += 1,
+                None => self.word_counts.push((word.clone(), 1)),
+            }
+        }
+
+        // Build vocabulary based on frequency
+        self.vocab.clear();
+        for (word, count) in &self.word_counts {
+            if *count >= self.threshold && self.vocab.len() < self.max_vocab_size {
+                self.vocab.push((word.clone(), self.vocab.len()));
+            }
+        }
+
+        // Second pass: tokenize
         for word in words {
-            let token = match self.vocab.iter().position(|(w, _)| w == &word) {
-                Some(index) => index,
-                None => {
-                    let new_index = self.vocab.len();
-                    self.vocab.push((word.clone(), new_index));
-                    new_index
-                }
-            };
+            let token = self.vocab.iter().position(|(w, _)| w == &word).unwrap_or(self.vocab.len());
             tokens.push(token);
         }
 
+        // Print statistics
         println!("Tokenized into {} tokens", tokens.len());
+        println!("Vocabulary size: {}", self.vocab.len());
+        println!("Total unique words: {}", self.word_counts.len());
+        
+        let words_kept = self.vocab.len();
+        let words_discarded = self.word_counts.len() - words_kept;
+        println!("Words kept: {}, Words discarded: {}", words_kept, words_discarded);
+        
+        if !self.vocab.is_empty() {
+            println!("Examples of kept words:");
+            for (word, _) in self.vocab.iter().take(5) {
+                println!("  - {}", word);
+            }
+        }
+        
+        if words_discarded > 0 {
+            println!("Examples of discarded words:");
+            let discarded_words: Vec<_> = self.word_counts.iter()
+                .filter(|(w, _)| !self.vocab.iter().any(|(vw, _)| vw == w))
+                .take(5)
+                .collect();
+            for (word, count) in discarded_words {
+                println!("  - {} (count: {})", word, count);
+            }
+        }
+
         tokens
     }
 
@@ -240,9 +283,22 @@ impl Tokenizer {
     }
 
     fn decode(&self, token: usize) -> &str {
-        &self.vocab[token].0
+        if token >= self.vocab.len() {
+            "<UNK>"
+        } else {
+            &self.vocab[token].0
+        }
     }
 }
+
+
+
+
+
+
+
+
+
 
 struct Embedding {
     vocab_size: usize,
@@ -794,7 +850,10 @@ impl Transformer {
         let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
         let input_text = input_words.join(" ");
         let prediction = self.predict_next_token(input, tokenizer);
-        println!("Input: '{}...'", input_text.chars().take(20).collect::<String>());
+        println!("Input: '{}...{}'", 
+            input_text.chars().take(20).collect::<String>(),
+            input_text.chars().rev().take(40).collect::<String>().chars().rev().collect::<String>()
+        );
         println!("Predicted next token: '{}'", prediction);
         println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
         println!("Calculated loss: {}", loss);
