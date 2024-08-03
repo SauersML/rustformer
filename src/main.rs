@@ -821,6 +821,15 @@ impl Transformer {
 
         println!("Calculated loss: {}", loss);
 
+        // Generate and print prediction
+        let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
+        let input_text = input_words.join(" ");
+        let prediction = self.predict_next_token(input, tokenizer);
+        println!("Input: '{}...'", input_text.chars().take(20).collect::<String>());
+        println!("Predicted next token: '{}'", prediction);
+        println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
+        println!("Calculated loss: {}", loss);
+
         // Backpropagate through output layer
         println!("Backpropagating through output layer");
         let output_gradients = self.output_layer.backward(&gradients, learning_rate);
@@ -861,17 +870,17 @@ impl Transformer {
         loss
     }
 
-    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer) -> String {
-        let output = self.forward(input);
-        let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
-        let probs = softmax(&last_row);
-        let next_token = probs.iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(index, _)| index)
-            .unwrap();
-        tokenizer.decode(next_token).to_string()
-    }
+        fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer) -> String {
+            let output = self.forward(input);
+            let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
+            let probs = softmax(&last_row);
+            let next_token = probs.iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map(|(index, _)| index)
+                .unwrap();
+            tokenizer.decode(next_token).to_string()
+        }
 
 }
 
@@ -925,11 +934,13 @@ fn main() {
 
             total_loss += loss;
             batch_count += 1;
-            println!("Epoch {}, Batch {}: Average Loss = {}", epoch + 1, batch_count, total_loss / batch_count as f64);
+            println!("Epoch {}, Batch {}: Loss = {}", epoch + 1, batch_count, loss);
             println!("--------------------");
         }
         println!("Epoch {} completed, Average Loss: {}", epoch + 1, total_loss / batch_count as f64);
     }
+
+
 
 
     // Generate predictions
