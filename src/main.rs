@@ -1,35 +1,40 @@
-#[derive(Clone)]
+const CHUNK_SIZE: usize = 64;
 
+#[derive(Clone)]
 struct Matrix {
     rows: usize,
     cols: usize,
-    data: Vec<f64>,
+    data: Vec<[f64; CHUNK_SIZE]>,
 }
 
 impl Matrix {
     fn new(rows: usize, cols: usize) -> Self {
-        println!("Creating new matrix with dimensions: {}x{}", rows, cols);
-        Matrix {
-            rows,
-            cols,
-            data: vec![0.0; rows * cols],
-        }
+        println!("Creating new Matrix: {}x{}", rows, cols);
+        let total_elements = rows * cols;
+        let chunks_needed = (total_elements + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let data = vec![[0.0; CHUNK_SIZE]; chunks_needed];
+        Matrix { rows, cols, data }
     }
 
     fn get(&self, row: usize, col: usize) -> f64 {
-        self.data[row * self.cols + col]
+        let index = row * self.cols + col;
+        let chunk = index / CHUNK_SIZE;
+        let offset = index % CHUNK_SIZE;
+        self.data[chunk][offset]
     }
 
     fn set(&mut self, row: usize, col: usize, value: f64) {
-        self.data[row * self.cols + col] = value;
+        let index = row * self.cols + col;
+        let chunk = index / CHUNK_SIZE;
+        let offset = index % CHUNK_SIZE;
+        self.data[chunk][offset] = value;
     }
 
     fn dot(&self, other: &Matrix) -> Matrix {
         assert!(self.cols == other.rows, "Incompatible matrix dimensions for multiplication");
-        
+        println!("Performing matrix multiplication: {}x{} * {}x{}", self.rows, self.cols, other.rows, other.cols);
         let rows = self.rows;
         let cols = other.cols;
-        println!("Performing matrix multiplication: {}x{} * {}x{}", rows, self.cols, other.rows, cols);
         let mut result = Matrix::new(rows, cols);
 
         for i in 0..rows {
@@ -46,14 +51,16 @@ impl Matrix {
 
     fn add(&self, other: &Matrix) -> Matrix {
         assert!(self.rows == other.rows && self.cols == other.cols, "Incompatible matrix dimensions for addition");
-        
+        println!("Matrix addition: {}x{} + {}x{}", self.rows, self.cols, other.rows, other.cols);
+
         let rows = self.rows;
         let cols = self.cols;
-        println!("Adding matrices: {}x{}", rows, cols);
         let mut result = Matrix::new(rows, cols);
 
-        for i in 0..self.data.len() {
-            result.data[i] = self.data[i] + other.data[i];
+        for i in 0..rows {
+            for j in 0..cols {
+                result.set(i, j, self.get(i, j) + other.get(i, j));
+            }
         }
         result
     }
@@ -61,7 +68,6 @@ impl Matrix {
     fn transpose(&self) -> Matrix {
         let rows = self.cols;
         let cols = self.rows;
-        println!("Transposing matrix: {}x{} to {}x{}", cols, rows, rows, cols);
         let mut result = Matrix::new(rows, cols);
         for i in 0..rows {
             for j in 0..cols {
@@ -72,27 +78,31 @@ impl Matrix {
     }
 
     fn subtract(&self, other: &Matrix) -> Matrix {
+        println!("Matrix subtraction: {}x{} - {}x{}", self.rows, self.cols, other.rows, other.cols);
         assert!(self.rows == other.rows && self.cols == other.cols, "Incompatible matrix dimensions for subtraction");
         
         let rows = self.rows;
         let cols = self.cols;
-        println!("Subtracting matrices: {}x{}", rows, cols);
         let mut result = Matrix::new(rows, cols);
 
-        for i in 0..self.data.len() {
-            result.data[i] = self.data[i] - other.data[i];
+        for i in 0..rows {
+            for j in 0..cols {
+                result.set(i, j, self.get(i, j) - other.get(i, j));
+            }
         }
         result
     }
 
     fn mul_scalar(&self, scalar: f64) -> Matrix {
+        println!("Scalar multiplication: {}x{} * {}", self.rows, self.cols, scalar);
         let rows = self.rows;
         let cols = self.cols;
-        println!("Multiplying matrix by scalar: {}x{} * {}", rows, cols, scalar);
         let mut result = Matrix::new(rows, cols);
 
-        for i in 0..self.data.len() {
-            result.data[i] = self.data[i] * scalar;
+        for i in 0..rows {
+            for j in 0..cols {
+                result.set(i, j, self.get(i, j) * scalar);
+            }
         }
         result
     }
@@ -105,6 +115,17 @@ impl Matrix {
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
 
 fn softmax(input: &[f64]) -> Vec<f64> {
     //println!("Applying softmax to vector of length {}", input.len());
@@ -164,12 +185,12 @@ impl Rng {
 
 fn initialize_weights(matrix: &mut Matrix, rng: &mut Rng) {
     println!("Initializing weights for matrix: {}x{}", matrix.rows, matrix.cols);
-    for i in 0..matrix.data.len() {
-        matrix.data[i] = rng.next_f64() * 2.0 - 1.0;
+    for chunk in matrix.data.iter_mut() {
+        for value in chunk.iter_mut() {
+            *value = rng.next_f64() * 2.0 - 1.0;
+        }
     }
 }
-
-
 
 
 
@@ -334,10 +355,22 @@ impl MultiHeadAttention {
 
         for h in 0..self.heads {
             let start = h * self.head_dim;
-            let end = start + self.head_dim;
-            q_heads.push(Matrix { rows: seq_len, cols: self.head_dim, data: q.data[start*seq_len..end*seq_len].to_vec() });
-            k_heads.push(Matrix { rows: seq_len, cols: self.head_dim, data: k.data[start*seq_len..end*seq_len].to_vec() });
-            v_heads.push(Matrix { rows: seq_len, cols: self.head_dim, data: v.data[start*seq_len..end*seq_len].to_vec() });
+
+            let mut q_head = Matrix::new(seq_len, self.head_dim);
+            let mut k_head = Matrix::new(seq_len, self.head_dim);
+            let mut v_head = Matrix::new(seq_len, self.head_dim);
+
+            for i in 0..seq_len {
+                for j in 0..self.head_dim {
+                    q_head.set(i, j, q.get(i, start + j));
+                    k_head.set(i, j, k.get(i, start + j));
+                    v_head.set(i, j, v.get(i, start + j));
+                }
+            }
+
+            q_heads.push(q_head);
+            k_heads.push(k_head);
+            v_heads.push(v_head);
         }
 
         // Compute attention for each head
@@ -446,8 +479,8 @@ impl MultiHeadAttention {
             for i in 0..seq_len {
                 for j in 0..seq_len {
                     for k in 0..self.head_dim {
-                        let dq = d_head.get(i, k) * self.w_k.get(j, h * self.head_dim + k) / (self.head_dim as f64).sqrt();
-                        let dk = d_head.get(i, k) * self.w_q.get(i, h * self.head_dim + k) / (self.head_dim as f64).sqrt();
+                        let dq = d_head.get(i, k) * self.w_k.get(h * self.head_dim + k, j) / (self.head_dim as f64).sqrt();
+                        let dk = d_head.get(i, k) * self.w_q.get(h * self.head_dim + k, i) / (self.head_dim as f64).sqrt();
                         let dv = d_head.get(i, k);
                         d_q_head.set(i, k, d_q_head.get(i, k) + dq);
                         d_k_head.set(j, k, d_k_head.get(j, k) + dk);
@@ -543,10 +576,13 @@ impl FeedForward {
         for i in 0..gradients.rows {
             for j in 0..self.input_dim {
                 for k in 0..self.input_dim * 4 {
-                    if hidden_gradients.get(i, k) > 0.0 {
-                        input_gradients.set(i, j, input_gradients.get(i, j) + hidden_gradients.get(i, k) * self.w1.get(j, k));
-                        self.w1.set(j, k, self.w1.get(j, k) - learning_rate * hidden_gradients.get(i, k) * input_gradients.get(i, j));
-                    }
+                let hidden_grad = hidden_gradients.get(i, k);
+                if hidden_grad > 0.0 {
+                    let input_grad = hidden_grad * self.w1.get(j, k);
+                    input_gradients.set(i, j, input_gradients.get(i, j) + input_grad);
+                    self.w1.set(j, k, self.w1.get(j, k) - learning_rate * hidden_grad * gradients.get(i, j));
+
+                }
                 }
                 self.b1[j] -= learning_rate * hidden_gradients.get(i, j);
             }
@@ -611,7 +647,8 @@ impl LayerNorm {
 
         for i in 0..gradients.rows {
             let mean: f64 = (0..gradients.cols).map(|j| gradients.get(i, j)).sum::<f64>() / gradients.cols as f64;
-            let variance: f64 = (0..gradients.cols).map(|j| (gradients.get(i, j) - mean).powi(2)).sum::<f64>() / gradients.cols as f64;
+            let variance: f64 = (0..self.dim).map(|j| (gradients.get(i, j) - mean).powi(2)).sum::<f64>() / self.dim as f64 + 1e-6;
+
             let std_dev = (variance + 1e-6).sqrt();
 
             for j in 0..gradients.cols {
@@ -777,7 +814,7 @@ impl Transformer {
             for j in 0..output.cols {
                 gradients.set(i, j, probs[j] - if j == target_index { 1.0 } else { 0.0 });
                 if j == target_index {
-                    loss -= probs[j].ln();
+                    loss -= (probs[j] + 1e-10).ln();
                 }
             }
         }
