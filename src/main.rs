@@ -902,17 +902,27 @@ impl Transformer {
         loss
     }
 
-        fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer) -> String {
-            let output = self.forward(input);
-            let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
-            let probs = softmax(&last_row);
-            let next_token = probs.iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .map(|(index, _)| index)
-                .unwrap();
-            tokenizer.decode(next_token).to_string()
-        }
+    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer) -> String {
+        let output = self.forward(input);
+        let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
+        let mut probs = softmax(&last_row);
+        
+        // Set probability of UNK token to 0
+        let unk_index = tokenizer.vocab.iter().position(|(word, _)| word == "<UNK>").unwrap_or(0);
+        probs[unk_index] = 0.0;
+        
+        // Renormalize probabilities
+        let sum: f64 = probs.iter().sum();
+        probs.iter_mut().for_each(|p| *p /= sum);
+        
+        let next_token = probs.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(index, _)| index)
+            .unwrap();
+        
+        tokenizer.decode(next_token).to_string()
+    }
 
 }
 
@@ -970,10 +980,8 @@ fn main() {
             batch_count += 1;
             
             current_iteration += batch_size;
-            if current_iteration % 100 == 0 {
-                let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
-                println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
-            }
+            let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
+            println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
 
             println!("Epoch {}, Batch {}: Average Loss = {}", epoch + 1, batch_count, batch_loss / batch_size as f64);
         }
@@ -992,7 +1000,16 @@ fn main() {
         let output = transformer.forward(&input_tokens);
 
         let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
-        let probs = softmax(&last_row);
+        let mut probs = softmax(&last_row);
+        
+        // Set probability of UNK token to 0
+        let unk_index = tokenizer.vocab.iter().position(|(word, _)| word == "<UNK>").unwrap_or(0);
+        probs[unk_index] = 0.0;
+        
+        // Renormalize probabilities
+        let sum: f64 = probs.iter().sum();
+        probs.iter_mut().for_each(|p| *p /= sum);
+
         let next_token = probs.iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
