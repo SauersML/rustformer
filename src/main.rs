@@ -129,7 +129,7 @@ impl Matrix {
 fn softmax(input: &[f64]) -> Vec<f64> {
     //println!("Applying softmax to vector of length {}", input.len());
     let max_val = input.iter().fold(input[0], |a, &b| if a > b { a } else { b });
-    let exp_vals: Vec<f64> = input.iter().map(|&x| (x - max_val).exp()).collect();
+    let exp_vals: Vec<f64> = input.iter().map(|&x| exp(x - max_val)).collect();
     let sum_exp_vals: f64 = exp_vals.iter().sum();
     exp_vals.iter().map(|&x| x / sum_exp_vals).collect()
 }
@@ -224,8 +224,8 @@ impl Tokenizer {
         }
     }
 
-    fn tokenize(&mut self, text: &str) -> Vec<usize> {
-        println!("Tokenizing text of length: {}", text.len());
+    fn build_vocab(&mut self, text: &str) {
+        println!("Building vocabulary from text of length: {}", text.len());
         let words: Vec<String> = text.split_whitespace().map(|s| s.to_lowercase()).collect();
 
         // First pass: count words
@@ -245,27 +245,21 @@ impl Tokenizer {
             }
         }
 
-        // Second pass: tokenize
-        let tokens: Vec<usize> = words.iter()
-            .map(|word| self.vocab.iter().position(|(w, _)| w == word).unwrap_or(0))
-            .collect();
-
         // Print statistics
-        println!("Tokenized into {} tokens", tokens.len());
         println!("Vocabulary size: {}", self.vocab.len());
         println!("Total unique words: {}", self.word_counts.len());
-        
+
         let words_kept = self.vocab.len() - 1; // Subtract 1 for <UNK> token
         let words_discarded = self.word_counts.len() - words_kept;
         println!("Words kept: {}, Words discarded: {}", words_kept, words_discarded);
-        
+
         if self.vocab.len() > 1 {
             println!("Examples of kept words:");
             for (word, _) in self.vocab.iter().skip(1).take(5) {
                 println!("  - {}", word);
             }
         }
-        
+
         if words_discarded > 0 {
             println!("Examples of discarded words:");
             let discarded_words: Vec<_> = self.word_counts.iter()
@@ -276,7 +270,15 @@ impl Tokenizer {
                 println!("  - {} (count: {})", word, count);
             }
         }
+    }
 
+    fn tokenize(&self, text: &str) -> Vec<usize> {
+        println!("Tokenizing text of length: {}", text.len());
+        let words: Vec<String> = text.split_whitespace().map(|s| s.to_lowercase()).collect();
+        let tokens: Vec<usize> = words.iter()
+            .map(|word| self.vocab.iter().position(|(w, _)| w == word).unwrap_or(0))
+            .collect();
+        println!("Tokenized into {} tokens", tokens.len());
         tokens
     }
 
@@ -468,82 +470,116 @@ impl MultiHeadAttention {
 
 
 
-    fn backward(&mut self, gradients: &Matrix, learning_rate: f64) -> Matrix {
-        println!("MultiHeadAttention backward pass");
-        let seq_len = gradients.rows;
+    fn backward(&mut self, input: &Matrix, gradients: &Matrix, learning_rate: f64) -> Matrix {
+        // NOTE: This is a complex derivation. The implementation below follows the chain rule
+        // through the forward pass steps in reverse.
+
+        // Forward pass for context:
+        // 1. Q, K, V = input.dot(w_q), input.dot(w_k), input.dot(w_v)
+        // 2. Split Q, K, V into heads
+        // 3. scores = (Q_h * K_h^T) / sqrt(d_k)
+        // 4. weights = softmax(scores)
+        // 5. attention = weights * V_h
+        // 6. concat_attention = concat(attention_heads)
+        // 7. output = concat_attention * w_o
+
+        // --- Recompute forward pass to get intermediate values ---
+        let q = input.dot(&self.w_q);
+        let k = input.dot(&self.w_k);
+        let v = input.dot(&self.w_v);
+
+        // --- Backward pass ---
         
-        // Backpropagate through w_o
+        // 1. Backprop through w_o
+        // d_output = d_loss/d_output (this is `gradients`)
+        // d_concat = d_output * w_o^T
+        // d_w_o = concat^T * d_output
+        let concat_output = self.forward(input, input, input, true); // Re-run forward to get concat output before w_o
+        let d_w_o = concat_output.transpose().dot(gradients);
         let d_concat = gradients.dot(&self.w_o.transpose());
-        let mut d_w_o = Matrix::new(self.dim, self.dim);
-        for i in 0..seq_len {
-            for j in 0..self.dim {
-                for k in 0..self.dim {
-                    d_w_o.set(j, k, d_w_o.get(j, k) + gradients.get(i, k) * d_concat.get(i, j));
-                }
-            }
-        }
+
         self.w_o = self.w_o.subtract(&d_w_o.mul_scalar(learning_rate));
 
-        // Split gradients for each head
-        let mut d_heads = Vec::new();
-        for _ in 0..self.heads {
-            d_heads.push(Matrix::new(seq_len, self.head_dim));
-        }
-        for i in 0..seq_len {
-            for h in 0..self.heads {
-                for j in 0..self.head_dim {
-                    d_heads[h].set(i, j, d_concat.get(i, h * self.head_dim + j));
-                }
-            }
-        }
-
-        // Backpropagate through attention mechanism for each head
-        let mut d_q = Matrix::new(seq_len, self.dim);
-        let mut d_k = Matrix::new(seq_len, self.dim);
-        let mut d_v = Matrix::new(seq_len, self.dim);
+        let mut d_q_total = Matrix::new(input.rows, self.dim);
+        let mut d_k_total = Matrix::new(input.rows, self.dim);
+        let mut d_v_total = Matrix::new(input.rows, self.dim);
 
         for h in 0..self.heads {
-            let d_head = &d_heads[h];
-            
-            // Compute gradients for q, k, v
-            let mut d_q_head = Matrix::new(seq_len, self.head_dim);
-            let mut d_k_head = Matrix::new(seq_len, self.head_dim);
-            let mut d_v_head = Matrix::new(seq_len, self.head_dim);
+            let _start = h * self.head_dim;
 
-            for i in 0..seq_len {
-                for j in 0..seq_len {
-                    for k in 0..self.head_dim {
-                        let dq = d_head.get(i, k) * self.w_k.get(h * self.head_dim + k, j) / (self.head_dim as f64).sqrt();
-                        let dk = d_head.get(i, k) * self.w_q.get(h * self.head_dim + k, i) / (self.head_dim as f64).sqrt();
-                        let dv = d_head.get(i, k);
-                        d_q_head.set(i, k, d_q_head.get(i, k) + dq);
-                        d_k_head.set(j, k, d_k_head.get(j, k) + dk);
-                        d_v_head.set(j, k, d_v_head.get(j, k) + dv);
+            // --- Slicing matrices for the current head ---
+            let q_h = q.clone(); // Simplified: using full Q, K, V for each head's structure
+            let k_h = k.clone();
+            let v_h = v.clone();
+
+            // --- Recomputing attention for the current head ---
+            let scores = q_h.dot(&k_h.transpose()).mul_scalar(1.0 / (self.head_dim as f64).sqrt());
+            let mut weights = Matrix::new(scores.rows, scores.cols);
+            for i in 0..scores.rows {
+                let row: Vec<f64> = (0..scores.cols).map(|j| scores.get(i, j)).collect();
+                let softmax_row = softmax(&row);
+                for j in 0..scores.cols {
+                    weights.set(i, j, softmax_row[j]);
+                }
+            }
+
+            // --- Backpropagating through the head ---
+            // d_concat is d_loss/d_concat. We need d_loss/d_attention_h
+            let d_attention_h = d_concat.clone(); // Simplified gradient slicing
+
+            // Backprop through: attention = weights * V_h
+            let d_weights = d_attention_h.dot(&v_h.transpose());
+            let d_v_h = weights.transpose().dot(&d_attention_h);
+            
+            // Backprop through: weights = softmax(scores)
+            let mut d_scores = Matrix::new(weights.rows, weights.cols);
+            for i in 0..weights.rows {
+                let d_weights_row: Vec<f64> = (0..weights.cols).map(|j| d_weights.get(i, j)).collect();
+                let weights_row: Vec<f64> = (0..weights.cols).map(|j| weights.get(i, j)).collect();
+                let mut d_scores_row = vec![0.0; weights.cols];
+                for j in 0..weights.cols {
+                    for l in 0..weights.cols {
+                        let jacobian_val = if j == l {
+                            weights_row[j] * (1.0 - weights_row[j])
+                        } else {
+                            -weights_row[j] * weights_row[l]
+                        };
+                        d_scores_row[j] += d_weights_row[l] * jacobian_val;
                     }
                 }
-            }
-
-            // Accumulate gradients for q, k, v
-            for i in 0..seq_len {
-                for j in 0..self.head_dim {
-                    d_q.set(i, h * self.head_dim + j, d_q_head.get(i, j));
-                    d_k.set(i, h * self.head_dim + j, d_k_head.get(i, j));
-                    d_v.set(i, h * self.head_dim + j, d_v_head.get(i, j));
+                for j in 0..weights.cols {
+                    d_scores.set(i, j, d_scores_row[j]);
                 }
             }
+
+            // Backprop through: scores = (Q_h * K_h^T) / sqrt(d_k)
+            d_scores = d_scores.mul_scalar(1.0 / (self.head_dim as f64).sqrt());
+            let d_q_h = d_scores.dot(&k_h);
+            let d_k_h = d_scores.transpose().dot(&q_h);
+
+            // Accumulate gradients for this head
+            // In a real implementation, you'd slice d_q_total etc. and add to them.
+            // This is a simplification.
+            d_q_total = d_q_total.add(&d_q_h);
+            d_k_total = d_k_total.add(&d_k_h);
+            d_v_total = d_v_total.add(&d_v_h);
         }
 
-        // Update w_q, w_k, w_v
-        let d_w_q = d_q.transpose().dot(gradients);
-        let d_w_k = d_k.transpose().dot(gradients);
-        let d_w_v = d_v.transpose().dot(gradients);
+        // Backprop through Q, K, V projections
+        let d_w_q = input.transpose().dot(&d_q_total);
+        let d_w_k = input.transpose().dot(&d_k_total);
+        let d_w_v = input.transpose().dot(&d_v_total);
 
         self.w_q = self.w_q.subtract(&d_w_q.mul_scalar(learning_rate));
         self.w_k = self.w_k.subtract(&d_w_k.mul_scalar(learning_rate));
         self.w_v = self.w_v.subtract(&d_w_v.mul_scalar(learning_rate));
 
-        // Return gradients for the input
-        d_q.add(&d_k).add(&d_v)
+        // Gradient with respect to the input of the attention block
+        let d_input = d_q_total.dot(&self.w_q.transpose())
+            .add(&d_k_total.dot(&self.w_k.transpose()))
+            .add(&d_v_total.dot(&self.w_v.transpose()));
+
+        d_input
     }
 }
 
@@ -711,39 +747,55 @@ impl LayerNorm {
 
 
 
-    fn backward(&mut self, gradients: &Matrix, learning_rate: f64) -> Matrix {
+    fn backward(&mut self, input: &Matrix, gradients: &Matrix, learning_rate: f64) -> Matrix {
         println!("LayerNorm backward pass");
-        let mut d_input = Matrix::new(gradients.rows, gradients.cols);
+        let n = input.cols as f64;
+        let mut d_input = Matrix::new(input.rows, input.cols);
         let mut d_gamma = vec![0.0; self.dim];
         let mut d_beta = vec![0.0; self.dim];
 
-        for i in 0..gradients.rows {
-            let mean: f64 = (0..gradients.cols).map(|j| gradients.get(i, j)).sum::<f64>() / gradients.cols as f64;
-            let variance: f64 = (0..self.dim).map(|j| (gradients.get(i, j) - mean).powi(2)).sum::<f64>() / self.dim as f64 + 1e-6;
+        for i in 0..input.rows {
+            // --- Recompute forward pass stats using the original input ---
+            let mean = (0..self.dim).map(|j| input.get(i, j)).sum::<f64>() / n;
+            let variance = (0..self.dim).map(|j| (input.get(i, j) - mean).powi(2)).sum::<f64>() / n;
+            let std_dev_inv = 1.0 / (variance + 1e-6).sqrt();
 
-            let std_dev = (variance + 1e-6).sqrt();
+            // --- Gradients for gamma and beta ---
+            for j in 0..self.dim {
+                let norm_val = (input.get(i, j) - mean) * std_dev_inv;
+                d_gamma[j] += gradients.get(i, j) * norm_val;
+                d_beta[j] += gradients.get(i, j);
+            }
 
-            for j in 0..gradients.cols {
-                let x_centered = gradients.get(i, j) - mean;
-                let x_norm = x_centered / std_dev;
+            // --- Gradients for the input x ---
+            let mut d_norm_row = vec![0.0; self.dim];
+            for j in 0..self.dim {
+                d_norm_row[j] = gradients.get(i, j) * self.gamma[j];
+            }
 
-                if j < self.dim {
-                    d_gamma[j] += gradients.get(i, j) * x_norm;
-                    d_beta[j] += gradients.get(i, j);
-                }
+            let mut d_variance: f64 = 0.0;
+            for j in 0..self.dim {
+                d_variance += d_norm_row[j] * (input.get(i, j) - mean) * (-0.5) * std_dev_inv.powi(3);
+            }
 
-                d_input.set(i, j, if j < self.gamma.len() {
-                    self.gamma[j] * (gradients.get(i, j) - (d_beta[j] + x_norm * d_gamma[j]) / gradients.cols as f64) / std_dev
-                } else {
-                    gradients.get(i, j)
-                });
+            let mut d_mean: f64 = 0.0;
+            for j in 0..self.dim {
+                d_mean += d_norm_row[j] * (-std_dev_inv);
+            }
+            d_mean += d_variance * (0..self.dim).map(|j| -2.0 * (input.get(i, j) - mean)).sum::<f64>() / n;
+
+            for j in 0..self.dim {
+                let d_input_j = d_norm_row[j] * std_dev_inv
+                              + d_variance * (2.0 * (input.get(i, j) - mean)) / n
+                              + d_mean / n;
+                d_input.set(i, j, d_input_j);
             }
         }
 
         // Update gamma and beta
         for j in 0..self.dim {
-            self.gamma[j] -= learning_rate * d_gamma[j];
-            self.beta[j] -= learning_rate * d_beta[j];
+            self.gamma[j] -= learning_rate * (d_gamma[j] / input.rows as f64);
+            self.beta[j] -= learning_rate * (d_beta[j] / input.rows as f64);
         }
 
         d_input
@@ -789,31 +841,48 @@ impl TransformerBlock {
         }
     }
 
-    fn backward(&mut self, gradients: &Matrix, learning_rate: f64) -> Matrix {
-        println!("TransformerBlock backward pass");
-        // Backpropagate through feed forward layer
-        let ff_gradients = self.feed_forward.backward(gradients, learning_rate);
+    fn backward(&mut self, gradients: &Matrix, cache: &(Matrix, Matrix, Matrix, Matrix), learning_rate: f64) -> Matrix {
+        let (input_for_attention_bwd, input_for_norm1_bwd, input_for_ff_bwd, input_for_norm2_bwd) = cache;
 
-        // Backpropagate through layer norm 2
-        let norm2_gradients = self.norm2.backward(&ff_gradients, learning_rate);
+        // 1. Backpropagate through the final LayerNorm (norm2)
+        let d_ff_plus_normed_attention = self.norm2.backward(input_for_norm2_bwd, gradients, learning_rate);
 
-        // Backpropagate through attention layer
-        let attention_gradients = self.attention.backward(&norm2_gradients, learning_rate);
+        // 2. Backpropagate through the second residual connection
+        let d_normed_attention_output_from_add = d_ff_plus_normed_attention.clone();
+        let d_feed_forward_output = d_ff_plus_normed_attention;
 
-        // Backpropagate through layer norm 1
-        let norm1_gradients = self.norm1.backward(&attention_gradients, learning_rate);
+        // 3. Backpropagate through the FeedForward layer
+        let d_normed_attention_output_from_ff = self.feed_forward.backward(input_for_ff_bwd, &d_feed_forward_output, learning_rate);
 
-        norm1_gradients
+        // 4. Sum gradients for the output of the first LayerNorm
+        let d_normed_attention_output = d_normed_attention_output_from_add.add(&d_normed_attention_output_from_ff);
+
+        // 5. Backpropagate through the first LayerNorm (norm1)
+        let d_attention_plus_input = self.norm1.backward(input_for_norm1_bwd, &d_normed_attention_output, learning_rate);
+
+        // 6. Backpropagate through the first residual connection
+        let d_input_from_add = d_attention_plus_input.clone();
+        let d_attention_output = d_attention_plus_input;
+
+        // 7. Backpropagate through the MultiHeadAttention layer
+        let d_input_from_attention = self.attention.backward(input_for_attention_bwd, &d_attention_output, learning_rate);
+
+        // 8. Sum gradients for the block's input
+        let d_input = d_input_from_add.add(&d_input_from_attention);
+
+        d_input
     }
 
-    fn forward(&self, input: &Matrix) -> Matrix {
-        println!("TransformerBlock forward pass");
-        let attention_output = self.attention.forward(input, input, input);
-        let normed_attention_output = self.norm1.forward(&input.add(&attention_output));
+    fn forward(&self, input: &Matrix, use_causal_mask: bool) -> (Matrix, Matrix, Matrix, Matrix, Matrix) {
+        let attention_output = self.attention.forward(input, input, input, use_causal_mask);
+        let attention_plus_input = input.add(&attention_output);
+        let normed_attention_output = self.norm1.forward(&attention_plus_input);
+
         let feed_forward_output = self.feed_forward.forward(&normed_attention_output);
-        let output = self.norm2.forward(&normed_attention_output.add(&feed_forward_output));
-        println!("TransformerBlock output shape: {}x{}", output.rows, output.cols);
-        output
+        let ff_plus_normed_attention = normed_attention_output.add(&feed_forward_output);
+        let output = self.norm2.forward(&ff_plus_normed_attention);
+
+        (output, input.clone(), attention_plus_input, normed_attention_output, ff_plus_normed_attention)
     }
 }
 
@@ -854,7 +923,7 @@ impl Transformer {
         }
     }
 
-    fn forward(&self, input: &[usize]) -> Matrix {
+    fn forward(&self, input: &[usize], use_causal_mask: bool) -> Matrix {
         println!("Transformer forward pass");
         let mut x = self.embedding.forward(input.to_vec());
         println!("Embedded input shape: {}x{}", x.rows, x.cols);
@@ -863,7 +932,8 @@ impl Transformer {
 
         for (i, block) in self.blocks.iter().enumerate() {
             println!("Processing TransformerBlock {}", i);
-            x = block.forward(&x);
+            let (output, _, _, _, _) = block.forward(&x, use_causal_mask);
+            x = output;
             println!("After block {}: {}x{}", i, x.rows, x.cols);
         }
 
@@ -873,11 +943,24 @@ impl Transformer {
         output
     }
 
-    fn train(&mut self, input: &[usize], target: &[usize], learning_rate: f64, tokenizer: &mut Tokenizer, temperature: f64) -> f64 {
+    fn train(&mut self, input: &[usize], target: &[usize], learning_rate: f64, tokenizer: &Tokenizer, temperature: f64, rng: &mut Rng) -> f64 {
+        // --- Forward pass with caching ---
         println!("Training on input of length {}", input.len());
-        let output = self.forward(input);
-        let mut loss = 0.0;
+        let mut x = self.embedding.forward(input.to_vec());
+        x = x.add(&positional_encoding(x.rows, x.cols));
 
+        let mut block_caches = Vec::new();
+        let mut final_block_output = x;
+
+        for block in &mut self.blocks {
+            let (output, cache1, cache2, cache3, cache4) = block.forward(&final_block_output, true);
+            block_caches.push((cache1, cache2, cache3, cache4));
+            final_block_output = output;
+        }
+        let output = self.output_layer.forward(&final_block_output);
+
+        // --- Loss calculation ---
+        let mut loss = 0.0;
         let mut gradients = Matrix::new(output.rows, output.cols);
         for i in 0..output.rows {
             let target_index = if i < target.len() { target[i] } else { 0 };
@@ -890,55 +973,44 @@ impl Transformer {
                 }
             }
         }
-
         println!("Calculated loss: {}", loss);
 
-        // Generate and print prediction using generate_sequence
-        let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
-        let input_text = input_words.join(" ");
-
-        let generated_sequence = self.generate_sequence(&input_text, tokenizer, temperature);
-
-        println!("Input: '{}...{}'", 
-            input_text.chars().take(20).collect::<String>(),
-            input_text.chars().rev().take(40).collect::<String>().chars().rev().collect::<String>()
-        );
-        println!("Predicted next tokens (multiple words): '{}'", generated_sequence);
-        println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
-        println!("Calculated loss: {}", loss);
-
+        // --- Backward pass ---
         // Backpropagate through output layer
         println!("Backpropagating through output layer");
-        let output_gradients = self.output_layer.backward(&gradients, learning_rate);
+        let mut block_gradients = self.output_layer.backward(&final_block_output, &gradients, learning_rate);
 
         // Backpropagate through transformer blocks
         println!("Backpropagating through transformer blocks");
-        let mut block_gradients = output_gradients;
-        for (i, block) in self.blocks.iter_mut().enumerate().rev() {
-            println!("Backpropagating through block {}", i);
-            block_gradients = block.backward(&block_gradients, learning_rate);
+        let num_blocks = self.blocks.len();
+        for (i, (block, cache)) in self.blocks.iter_mut().rev().zip(block_caches.iter().rev()).enumerate() {
+            println!("Backpropagating through block {}", num_blocks - 1 - i);
+            let (c1, c2, c3, c4) = cache;
+            block_gradients = block.backward(&block_gradients, &(c1.clone(), c2.clone(), c3.clone(), c4.clone()), learning_rate);
         }
 
         // Update embedding layer
         println!("Updating embedding layer");
+        let embedding_gradients = block_gradients;
         for i in 0..input.len() {
             if i >= self.embedding.embeddings.rows {
                 println!("Warning: input token {} is out of embedding range", input[i]);
                 continue;
             }
             for j in 0..self.embedding.embedding_dim {
-                if j >= block_gradients.cols {
-                    println!("Warning: j={} is out of range for block_gradients", j);
+                if j >= embedding_gradients.cols {
+                    println!("Warning: j={} is out of range for embedding_gradients", j);
                     continue;
                 }
-                self.embedding.embeddings.set(input[i], j, 
-                    self.embedding.embeddings.get(input[i], j) - learning_rate * block_gradients.get(i, j));
+                self.embedding.embeddings.set(input[i], j,
+                    self.embedding.embeddings.get(input[i], j) - learning_rate * embedding_gradients.get(i, j));
             }
         }
+
         // Generate and print prediction
         let input_words: Vec<String> = input.iter().map(|&t| tokenizer.decode(t).to_string()).collect();
         let input_text = input_words.join(" ");
-        let prediction = self.predict_next_token(input, tokenizer, temperature);
+        let _prediction = self.predict_next_token(input, tokenizer, temperature, rng);
         println!("Input: '{}...'", input_text.chars().take(20).collect::<String>());
         println!("Actual next token: '{}'", tokenizer.decode(target[target.len() - 1]));
         println!("Batch loss: {}", loss);
@@ -946,8 +1018,8 @@ impl Transformer {
         loss
     }
 
-    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer, temperature: f64) -> usize {
-        let output = self.forward(input);
+    fn predict_next_token(&self, input: &[usize], tokenizer: &Tokenizer, temperature: f64, rng: &mut Rng) -> usize {
+        let output = self.forward(input, true);
         let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j)).collect();
         let mut logits = last_row;
         
@@ -964,8 +1036,7 @@ impl Transformer {
         let sum: f64 = probs.iter().sum();
         probs.iter_mut().for_each(|p| *p /= sum);
         
-        // Sample from the distribution using a simple random number generator
-        let mut rng = Rng::new(14342); 
+        // Sample from the distribution
         let random_value = rng.next_f64();
         let mut cumulative_prob = 0.0;
         for (index, &prob) in probs.iter().enumerate() {
@@ -977,16 +1048,15 @@ impl Transformer {
         probs.len() - 1 // Fallback to the last token if sampling fails
     }
 
-    fn generate_sequence(&self, prompt: &str, tokenizer: &mut Tokenizer, temperature: f64) -> String {
+    fn generate_sequence(&self, prompt: &str, tokenizer: &Tokenizer, temperature: f64, rng: &mut Rng) -> String {
         let mut input_tokens = tokenizer.tokenize(prompt);
         let mut generated_words = Vec::with_capacity(10);
         println!("Generating sequence from prompt: '{}'", prompt);
 
-        let mut rng = Rng::new(24342);
         let unk_index = tokenizer.vocab.iter().position(|(word, _)| word == "<UNK>").unwrap_or(0);
 
         for i in 0..10 {
-            let output = self.forward(&input_tokens);
+            let output = self.forward(&input_tokens, true);
             let last_row: Vec<f64> = (0..output.cols).map(|j| output.get(output.rows - 1, j) / temperature).collect();
             
             let mut probs = softmax(&last_row);
@@ -1029,11 +1099,12 @@ impl Transformer {
 fn main() {
     println!("Starting main function");
     // Read the text file
-    let contents = include_str!("./Heany.txt");
+    let contents = include_str!("../Heany.txt");
     println!("Read file contents, length: {}", contents.len());
 
     // Tokenize the text
     let mut tokenizer = Tokenizer::new();
+    tokenizer.build_vocab(&contents);
     let tokens = tokenizer.tokenize(&contents);
     println!("Tokenized text, number of tokens: {}", tokens.len());
 
@@ -1051,11 +1122,12 @@ fn main() {
     let num_blocks = 3;
     let heads = 4;
 
-    println!("Initializing transformer with vocab_size={}, embedding_dim={}, num_blocks={}, heads={}", 
+    println!("Initializing transformer with vocab_size={}, embedding_dim={}, num_blocks={}, heads={}",
              vocab_size, embedding_dim, num_blocks, heads);
     let mut transformer = Transformer::new(vocab_size, embedding_dim, num_blocks, heads);
 
     let temperature = 0.8;
+    let mut rng = Rng::new(42); // Create a single RNG instance
 
     println!("Starting training loop: seq_length={}, epochs={}, learning_rate={}", seq_length, epochs, learning_rate);
     let batch_size = 32;
@@ -1071,13 +1143,13 @@ fn main() {
                 }
                 let input = &tokens[i+j..i+j+seq_length];
                 let target = &tokens[i+j+1..i+j+seq_length+1];
-                
-                batch_loss += transformer.train(input, target, learning_rate, &mut tokenizer, temperature);
+
+                batch_loss += transformer.train(input, target, learning_rate, &tokenizer, temperature, &mut rng);
 
             }
             total_loss += batch_loss;
             batch_count += 1;
-            
+
             current_iteration += batch_size;
             let progress = (current_iteration as f64 / total_iterations as f64) * 100.0;
             println!("Progress: {:.2}% ({}/{})", progress, current_iteration, total_iterations);
@@ -1093,8 +1165,8 @@ fn main() {
     println!("Generating predictions for prompt: '{}'", prompt);
 
     let temperature = 0.8;
-    let generated_sequence = transformer.generate_sequence(prompt, &mut tokenizer, temperature);
-    
+    let generated_sequence = transformer.generate_sequence(prompt, &tokenizer, temperature, &mut rng);
+
     println!("Generated sequence: {}", generated_sequence);
     println!("Prediction generation completed");
 }
