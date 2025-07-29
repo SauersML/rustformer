@@ -1029,7 +1029,7 @@ impl Transformer {
 fn main() {
     println!("Starting main function");
     // Read the text file
-    let contents = include_str!("../Heany.txt");
+    let contents = include_str!("./Heany.txt");
     println!("Read file contents, length: {}", contents.len());
 
     // Tokenize the text
