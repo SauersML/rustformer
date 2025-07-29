@@ -402,23 +402,22 @@ impl MultiHeadAttention {
         MultiHeadAttention { heads, dim, head_dim, w_q, w_k, w_v, w_o }
     }
 
-    fn forward(&self, query: &Matrix, key: &Matrix, value: &Matrix) -> Matrix {
-        println!("MultiHeadAttention forward pass");
+    fn forward(&self, query: &Matrix, key: &Matrix, value: &Matrix, use_causal_mask: bool) -> Matrix {
         let seq_len = query.rows;
         
-        // Project inputs to q, k, v
+        // Project inputs into query, key, and value matrices.
         let q = query.dot(&self.w_q);
         let k = key.dot(&self.w_k);
         let v = value.dot(&self.w_v);
 
+        // This will hold the concatenated outputs from all attention heads.
         let mut concat_output = Matrix::new(seq_len, self.dim);
 
         for h in 0..self.heads {
-            println!("Processing head {}", h);
             let start = h * self.head_dim;
             let end = start + self.head_dim;
 
-            // Compute attention scores
+            // Compute scaled dot-product attention scores.
             let mut attention_scores = Matrix::new(seq_len, seq_len);
             for i in 0..seq_len {
                 for j in 0..seq_len {
@@ -430,7 +429,16 @@ impl MultiHeadAttention {
                 }
             }
 
-            // Apply softmax
+            // Apply causal mask to prevent attending to future tokens.
+            if use_causal_mask {
+                for i in 0..seq_len {
+                    for j in (i + 1)..seq_len {
+                        attention_scores.set(i, j, f64::NEG_INFINITY);
+                    }
+                }
+            }
+
+            // Apply softmax to get attention weights.
             for i in 0..seq_len {
                 let row: Vec<f64> = (0..seq_len).map(|j| attention_scores.get(i, j)).collect();
                 let softmax_row = softmax(&row);
@@ -439,24 +447,21 @@ impl MultiHeadAttention {
                 }
             }
 
-            // Apply attention to values and directly set to concat_output
+            // Apply attention weights to value vectors.
             for i in 0..seq_len {
                 for j in start..end {
                     let mut sum = 0.0;
-                    for k in 0..seq_len {
-                        sum += attention_scores.get(i, k) * v.get(k, j);
+                    for k_idx in 0..seq_len {
+                        sum += attention_scores.get(i, k_idx) * v.get(k_idx, j);
                     }
                     concat_output.set(i, j, sum);
                 }
             }
         }
-
-        println!("MultiHeadAttention output shape: {}x{}", concat_output.rows, concat_output.cols);
-        // Final linear layer
+        
+        // Final linear projection.
         concat_output.dot(&self.w_o)
     }
-
-
 
 
 
