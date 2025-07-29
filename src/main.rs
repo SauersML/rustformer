@@ -579,47 +579,85 @@ impl FeedForward {
     }
 
 
-    fn backward(&mut self, gradients: &Matrix, learning_rate: f64) -> Matrix {
+    
+    fn backward(&mut self, input: &Matrix, gradients: &Matrix, learning_rate: f64) -> Matrix {
         println!("FeedForward backward pass");
-        let mut hidden_gradients = Matrix::new(gradients.rows, self.input_dim * 4);
-        let mut input_gradients = Matrix::new(gradients.rows, self.input_dim);
+        
+        // a1 = ReLU(input.dot(w1) + b1)
+        let hidden_pre_activation = input.dot(&self.w1); // z1 = input.dot(w1)
+        let mut hidden_activations = Matrix::new(input.rows, self.w1.cols); // a1
+        for i in 0..input.rows {
+            for j in 0..self.w1.cols {
+                // Add bias and apply ReLU activation
+                let z1 = hidden_pre_activation.get(i, j) + self.b1[j];
+                hidden_activations.set(i, j, if z1 > 0.0 { z1 } else { 0.0 });
+            }
+        }
+        
+        // The gradient of the loss with respect to a weight is the product of the
+        // input activation to that weight and the error signal from the output.
+        // d_w2 = a1^T .dot(d_output)
+        let d_w2 = hidden_activations.transpose().dot(gradients);
 
-        // Backpropagate through second layer
+        // Gradient for the bias b2 is the sum of the output gradients for each sample.
+        let mut d_b2 = vec![0.0; self.output_dim];
         for i in 0..gradients.rows {
+            for k in 0..self.output_dim {
+                d_b2[k] += gradients.get(i, k);
+            }
+        }
+
+        // d_a1 = d_output .dot(w2^T)
+        let d_hidden_activations = gradients.dot(&self.w2.transpose());
+
+        // The derivative of ReLU is 1 for inputs > 0, and 0 otherwise.
+        // d_z1 = d_a1 * (z1 > 0)
+        let mut d_hidden_pre_activation = Matrix::new(input.rows, self.input_dim * 4);
+        for i in 0..input.rows {
+            for j in 0..self.w1.cols {
+                let z1 = hidden_pre_activation.get(i, j) + self.b1[j];
+                if z1 > 0.0 {
+                    d_hidden_pre_activation.set(i, j, d_hidden_activations.get(i, j));
+                } else {
+                    d_hidden_pre_activation.set(i, j, 0.0);
+                }
+            }
+        }
+
+        // d_w1 = input^T .dot(d_z1)
+        let d_w1 = input.transpose().dot(&d_hidden_pre_activation);
+
+        // Gradient for bias b1
+        let mut d_b1 = vec![0.0; self.input_dim * 4];
+        for i in 0..d_hidden_pre_activation.rows {
             for j in 0..self.input_dim * 4 {
-                for k in 0..self.output_dim {
-                    hidden_gradients.set(i, j, hidden_gradients.get(i, j) + gradients.get(i, k) * self.w2.get(j, k));
-                    self.w2.set(j, k, self.w2.get(j, k) - learning_rate * gradients.get(i, k) * hidden_gradients.get(i, j));
-                }
+                d_b1[j] += d_hidden_pre_activation.get(i, j);
             }
         }
+        
+        // d_input = d_z1 .dot(w1^T)
+        let input_gradients = d_hidden_pre_activation.dot(&self.w1.transpose());
 
-        // Update b2
+        for j in 0..self.input_dim * 4 {
+            for k in 0..self.output_dim {
+                self.w2.set(j, k, self.w2.get(j, k) - learning_rate * d_w2.get(j, k));
+            }
+        }
         for k in 0..self.output_dim {
-            for i in 0..gradients.rows {
-                self.b2[k] -= learning_rate * gradients.get(i, k);
-            }
+            self.b2[k] -= learning_rate * d_b2[k];
         }
 
-        // Backpropagate through first layer and ReLU
-        for i in 0..gradients.rows {
-            for j in 0..self.input_dim {
-                for k in 0..self.input_dim * 4 {
-                let hidden_grad = hidden_gradients.get(i, k);
-                if hidden_grad > 0.0 {
-                    let input_grad = hidden_grad * self.w1.get(j, k);
-                    input_gradients.set(i, j, input_gradients.get(i, j) + input_grad);
-                    self.w1.set(j, k, self.w1.get(j, k) - learning_rate * hidden_grad * gradients.get(i, j));
-
-                }
-                }
-                self.b1[j] -= learning_rate * hidden_gradients.get(i, j);
+        for j in 0..self.input_dim {
+            for k in 0..self.input_dim * 4 {
+                self.w1.set(j, k, self.w1.get(j, k) - learning_rate * d_w1.get(j, k));
             }
+        }
+        for j in 0..self.input_dim * 4 {
+            self.b1[j] -= learning_rate * d_b1[j];
         }
 
         input_gradients
     }
-
 
 
     fn forward(&self, input: &Matrix) -> Matrix {
